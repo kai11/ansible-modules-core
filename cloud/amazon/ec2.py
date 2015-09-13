@@ -117,7 +117,7 @@ options:
   spot_wait_timeout:
     version_added: "1.5"
     description:
-      - how long to wait for the spot instance request to be fulfilled
+      - how long to wait for the spot instance request to be fulfilled.  If request not fulfilled, it will be cancelled before module failure.
     default: 600
     aliases: []
   count:
@@ -1037,22 +1037,29 @@ def create_instances(module, ec2, vpc, override_count=None):
 
                 # Now we have to do the intermediate waiting
                 if wait:
+                    spot_req_cancel_ids = []
                     spot_req_inst_ids = dict()
                     spot_wait_timeout = time.time() + spot_wait_timeout
                     while spot_wait_timeout > time.time():
                         reqs = ec2.get_all_spot_instance_requests()
+                        spot_req_cancel_ids = []
                         for sirb in res:
                             if sirb.id in spot_req_inst_ids:
                                 continue
                             for sir in reqs:
-                                if sir.id == sirb.id and sir.instance_id is not None:
-                                    spot_req_inst_ids[sirb.id] = sir.instance_id
+                                if sir.id == sirb.id:
+                                    if sir.instance_id is not None:
+                                        spot_req_inst_ids[sirb.id] = sir.instance_id
+                                    else:
+                                        spot_req_cancel_ids.append(sirb.id)
                         if len(spot_req_inst_ids) < count:
                             time.sleep(5)
                         else:
                             break
                     if spot_wait_timeout <= time.time():
-                        module.fail_json(msg = "wait for spot requests timeout on %s" % time.asctime())
+                        if len(spot_req_cancel_ids) > 0:
+                            ec2.cancel_spot_instance_requests(spot_req_cancel_ids)
+                        module.fail_json(msg = "wait for spot requests timeout on %s, cancelled %s" % (time.asctime(), spot_req_cancel_ids))
                     instids = spot_req_inst_ids.values()
         except boto.exception.BotoServerError, e:
             module.fail_json(msg = "Instance creation failed => %s: %s" % (e.error_code, e.error_message))
